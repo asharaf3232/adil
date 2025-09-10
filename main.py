@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.5.1 - Bybit API Fix"
+BOT_VERSION = "v5.5.2 - Syntax & Bybit Fix"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
