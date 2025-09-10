@@ -160,7 +160,8 @@ def init_database():
 # --- States & Keyboards ---
 (EXCHANGE, SYMBOL, QUANTITY, PRICE, SET_GLOBAL_ALERT, 
  SELECT_COIN_ALERT, SET_COIN_ALERT) = range(7)
-(REMOVE_ID, EDIT_ID, CHOOSE_EDIT_FIELD, GET_NEW_QUANTITY, GET_NEW_PRICE) = range(7, 12)
+(REMOVE_ID, EDIT_ID, CHOOSE_EDIT_FIELD, GET_NEW_QUANTITY, GET_NEW_PRICE, 
+ CHOOSE_SETTING) = range(7, 13)
 
 exchanges = {}
 
@@ -351,20 +352,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("استخدم الأزرار بالأسفل لإدارة محفظتك.", reply_markup=MAIN_REPLY_MARKUP)
 # --- Settings Conversation ---
-async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     settings = db_get_or_create_settings(user_id)
     status = "🔔 مفعلة" if settings['alerts_enabled'] else "🔕 معطلة"
     g_threshold = settings['global_alert_threshold']
     keyboard = [[KeyboardButton(f"تبديل حالة التنبيهات (الحالة: {status})")],[KeyboardButton(f"تنبيه المحفظة الكلي (الحالي: {g_threshold}%)")],[KeyboardButton("⚙️ تخصيص تنبيهات العملات")],[KeyboardButton("🔙 العودة للقائمة الرئيسية")]]
     await update.message.reply_text("⚙️ **الإعدادات**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
-async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return CHOOSE_SETTING
+
+async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     settings = db_get_or_create_settings(user_id)
     new_status = not settings['alerts_enabled']
     db_update_alert_settings(user_id, new_status, settings['global_alert_threshold'])
     await update.message.reply_text(f"✅ تم تحديث حالة التنبيهات.")
-    await settings_start(update, context)
+    # Call settings_start to show the updated menu and stay in the conversation
+    return await settings_start(update, context)
+
 async def change_global_threshold_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("أرسل النسبة المئوية الجديدة لتنبيه **المحفظة بالكامل**.", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
     return SET_GLOBAL_ALERT
@@ -766,6 +771,11 @@ def main() -> None:
     settings_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_start)],
         states={
+            CHOOSE_SETTING: [
+                MessageHandler(filters.Regex("^تبديل حالة التنبيهات"), toggle_alerts),
+                MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
+                MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
+            ],
             SET_GLOBAL_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_global_threshold)],
             SELECT_COIN_ALERT: [CallbackQueryHandler(select_coin_alert_callback)],
             SET_COIN_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_coin_threshold)],
@@ -780,13 +790,11 @@ def main() -> None:
     application.add_handler(settings_conv)
     application.add_handler(MessageHandler(filters.Regex("^📊 عرض المحفظة$"), portfolio_command))
     application.add_handler(MessageHandler(filters.Regex("^❓ مساعدة$"), help_command))
-    application.add_handler(MessageHandler(filters.Regex("^تبديل حالة التنبيهات"), toggle_alerts))
-    application.add_handler(MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start))
-    application.add_handler(MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start))
-
+    
     logger.info(f"... البوت قيد التشغيل (النسخة: {instance_id}) ...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+
 
