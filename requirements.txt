@@ -1,6 +1,2 @@
+python-telegram-bot
 ccxt
-pandas
-pandas-ta
-python-telegram-bot[job-queue]requests
-scipy
-python-dotenv
