@@ -400,8 +400,11 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove_command))
 
     logger.info("... البوت قيد التشغيل ...")
-    application.run_polling()
+    # --- [تم التعديل هنا] ---
+    # هذا الأمر يجبر البوت على بدء جلسة نظيفة مع تليجرام
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
+
