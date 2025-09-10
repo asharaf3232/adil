@@ -8,8 +8,8 @@ import psycopg2
 import sys
 import uuid
 import time as sync_time
-import random # [تم الإصلاح هنا]
-import functools # [تمت الإضافة هنا]
+import random
+import functools
 from decimal import Decimal, getcontext
 from datetime import time, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.2.0 - Final Stable"
+BOT_VERSION = "v5.2.1 - Patched"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -71,7 +71,7 @@ def acquire_lock(instance_id):
             return True
     except Exception as e:
         logger.error(f"خطأ في الحصول على القفل: {e}")
-        conn.rollback()
+        if conn: conn.rollback()
         return False
     finally:
         if conn:
@@ -102,30 +102,60 @@ def init_database():
     if not conn: return
     try:
         with conn.cursor() as cur:
+            # --- Schema Creation ---
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS portfolio (
-                    id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, symbol TEXT NOT NULL,
-                    exchange TEXT NOT NULL, quantity TEXT NOT NULL, avg_price TEXT NOT NULL,
-                    alert_threshold REAL, alert_last_price TEXT,
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    avg_price TEXT NOT NULL,
+                    alert_threshold REAL,
                     UNIQUE(user_id, symbol, exchange)
                 );
                 CREATE TABLE IF NOT EXISTS user_settings (
-                    user_id BIGINT PRIMARY KEY, alerts_enabled BOOLEAN DEFAULT FALSE,
-                    global_alert_threshold REAL DEFAULT 5.0, last_portfolio_value TEXT,
+                    user_id BIGINT PRIMARY KEY,
+                    alerts_enabled BOOLEAN DEFAULT FALSE,
+                    global_alert_threshold REAL DEFAULT 5.0,
+                    last_portfolio_value TEXT,
                     last_check_time TIMESTAMP WITH TIME ZONE
                 );
                 CREATE TABLE IF NOT EXISTS bot_lock (
-                    id INT PRIMARY KEY, is_locked BOOLEAN NOT NULL DEFAULT FALSE,
-                    locked_at TIMESTAMP WITH TIME ZONE, owner_id TEXT
+                    id INT PRIMARY KEY,
+                    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+                    locked_at TIMESTAMP WITH TIME ZONE
                 );
             ''')
+            conn.commit()
+
+            # --- Schema Migration (Add columns if they don't exist) ---
+            def add_column_if_not_exists(table_name, column_name, column_type):
+                cur.execute(f"""
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='{table_name}' AND column_name='{column_name}'
+                """)
+                if cur.fetchone() is None:
+                    cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                    logger.info(f"تمت إضافة عمود '{column_name}' إلى جدول '{table_name}'.")
+
+            add_column_if_not_exists('portfolio', 'alert_last_price', 'TEXT')
+            add_column_if_not_exists('bot_lock', 'owner_id', 'TEXT')
+            
+            # --- Data Initialization ---
             cur.execute("INSERT INTO bot_lock (id, is_locked) VALUES (%s, FALSE) ON CONFLICT (id) DO NOTHING", (LOCK_ID,))
+            
         conn.commit()
         logger.info("تم تهيئة/التحقق من جداول قاعدة البيانات بنجاح.")
+    except psycopg2.Error as e:
+        logger.error(f"خطأ في قاعدة البيانات أثناء التهيئة: {e}")
+        if conn: conn.rollback()
     except Exception as e:
         logger.error(f"حدث خطأ فادح أثناء تهيئة قاعدة البيانات: {e}")
+        if conn: conn.rollback()
     finally:
         if conn: conn.close()
+
 
 # --- بقية الكود ---
 (EXCHANGE, SYMBOL, QUANTITY, PRICE, SET_GLOBAL_ALERT, 
@@ -563,7 +593,6 @@ def main() -> None:
         logger.info("لم يتم الحصول على القفل. سيتم إغلاق هذه النسخة.")
         sys.exit(0)
 
-    # [تم الإصلاح هنا] تعديل طريقة تمرير المعاملات لـ post_shutdown
     shutdown_handler = functools.partial(post_shutdown, instance_id=instance_id)
 
     application = (
@@ -602,4 +631,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
