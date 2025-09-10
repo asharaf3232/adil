@@ -6,8 +6,9 @@ import logging
 import asyncio
 import psycopg2 
 import sys
-import uuid # [جديد] لتوليد معرفات فريدة
+import uuid
 import time as sync_time
+import random # [تم الإصلاح هنا] إضافة المكتبة المفقودة
 from decimal import Decimal, getcontext
 from datetime import time, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -27,7 +28,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.0.0 - Stable Edition"
+BOT_VERSION = "v5.0.1 - Final Fix"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -56,11 +57,13 @@ def acquire_lock(instance_id):
             lock = cur.fetchone()
             if lock:
                 is_locked, locked_at, owner_id = lock
-                is_stale = (datetime.now(ZoneInfo("UTC")) - locked_at) > timedelta(seconds=LOCK_TIMEOUT_SECONDS)
-                if is_locked and not is_stale:
-                    logger.warning(f"قفل نشط مملوك من {owner_id}. سيتم إيقاف هذه النسخة.")
-                    conn.rollback()
-                    return False
+                # Check if locked_at is not None before proceeding
+                if locked_at:
+                    is_stale = (datetime.now(ZoneInfo("UTC")) - locked_at) > timedelta(seconds=LOCK_TIMEOUT_SECONDS)
+                    if is_locked and not is_stale:
+                        logger.warning(f"قفل نشط مملوك من {owner_id}. سيتم إيقاف هذه النسخة.")
+                        conn.rollback()
+                        return False
             cur.execute("UPDATE bot_lock SET is_locked = TRUE, locked_at = %s, owner_id = %s WHERE id = %s", 
                         (datetime.now(ZoneInfo("UTC")), instance_id, LOCK_ID))
             conn.commit()
@@ -170,7 +173,6 @@ async def post_shutdown(application: Application, instance_id: str):
             logger.info(f"تم إغلاق الاتصال بمنصة {ex_id}.")
         except: pass
 
-# ... (بقية الكود يحتوي على كل الدوال السابقة بالإضافة إلى الميزات الجديدة) ...
 MAIN_KEYBOARD = [[KeyboardButton("📊 عرض المحفظة")],[KeyboardButton("➕ إضافة عملة"), KeyboardButton("🗑️ حذف عملة")],[KeyboardButton("⚙️ الإعدادات"), KeyboardButton("❓ مساعدة")]]
 MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
 def format_price(price_decimal):
