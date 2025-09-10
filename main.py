@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.4.0 - Robust Price Fetching"
+BOT_VERSION = "v5.4.1 - Crash Fix"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -792,8 +792,8 @@ def main() -> None:
         states={
             CHOOSE_SETTING: [
                 MessageHandler(filters.Regex("^تبديل حالة التنبيهات"), toggle_alerts),
-                MessageHandler(filters.rules.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
-                MessageHandler(filters.rules.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
+                MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
+                MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
             ],
             SET_GLOBAL_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_global_threshold)],
             SELECT_COIN_ALERT: [CallbackQueryHandler(select_coin_alert_callback)],
