@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.3.0 - Edit Feature"
+BOT_VERSION = "v5.4.0 - Robust Price Fetching"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -163,6 +163,7 @@ def init_database():
 (REMOVE_ID, EDIT_ID, CHOOSE_EDIT_FIELD, GET_NEW_QUANTITY, GET_NEW_PRICE, 
  CHOOSE_SETTING) = range(7, 13)
 
+
 exchanges = {}
 
 MAIN_KEYBOARD = [
@@ -182,7 +183,8 @@ async def post_init(application: Application):
             exchange_class = getattr(ccxt, ex_id)
             exchanges[ex_id] = exchange_class({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
             logger.info(f"تم الاتصال بمنصة {ex_id} بنجاح.")
-        except: pass
+        except Exception as e:
+            logger.error(f"فشل الاتصال بمنصة {ex_id}: {e}")
             
     cairo_tz = ZoneInfo("Africa/Cairo")
     report_time = time(hour=23, minute=55, tzinfo=cairo_tz) 
@@ -367,7 +369,6 @@ async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     new_status = not settings['alerts_enabled']
     db_update_alert_settings(user_id, new_status, settings['global_alert_threshold'])
     await update.message.reply_text(f"✅ تم تحديث حالة التنبيهات.")
-    # Call settings_start to show the updated menu and stay in the conversation
     return await settings_start(update, context)
 
 async def change_global_threshold_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -440,13 +441,35 @@ async def received_coin_threshold(update: Update, context: ContextTypes.DEFAULT_
 # --- Portfolio Logic ---
 async def fetch_price(exchange_id, symbol):
     exchange = exchanges.get(exchange_id)
-    if not exchange: return None
-    symbols_to_try = [symbol, symbol.replace('/', '-'), symbol.replace('/', '')]
+    if not exchange: 
+        logger.error(f"Exchange {exchange_id} not initialized.")
+        return None
+    
+    base, quote = symbol.split('/')
+    symbols_to_try = [
+        symbol,          # Example: COOKIE/USDT
+        f"{base}{quote}", # Example: COOKIEUSDT
+    ]
+    
     for s in symbols_to_try:
         try:
-            ticker = await exchange.fetch_ticker(s); return ticker['last']
-        except: continue
+            params = {}
+            if exchange_id == 'bybit':
+                params = {'type': 'spot'}
+
+            ticker = await exchange.fetch_ticker(s, params=params)
+            if ticker and 'last' in ticker and ticker['last'] is not None:
+                return ticker['last']
+        except ccxt.BaseError as e:
+            logger.warning(f"Could not fetch ticker for {s} on {exchange_id}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while fetching ticker for {s} on {exchange_id}: {e}")
+            continue
+            
+    logger.error(f"Failed to fetch price for original symbol {symbol} on {exchange_id} after trying all variations.")
     return None
+
 async def get_portfolio_value(user_id: int):
     portfolio = db_get_portfolio(user_id)
     if not portfolio: return Decimal('0.0')
@@ -466,13 +489,12 @@ async def generate_portfolio_report(user_id: int) -> str:
     total_portfolio_value = Decimal('0.0'); total_investment_cost = Decimal('0.0')
     report_lines = []
     
-    # First loop to calculate totals
     for i, item in enumerate(portfolio):
         quantity = Decimal(item['quantity']); avg_price = Decimal(item['avg_price'])
         investment_cost = quantity * avg_price
         total_investment_cost += investment_cost
         current_price = results[i]
-        current_value = investment_cost # Fallback to cost if price is unavailable
+        current_value = investment_cost
         if current_price: 
             current_value = quantity * Decimal(str(current_price))
         total_portfolio_value += current_value
@@ -489,7 +511,6 @@ async def generate_portfolio_report(user_id: int) -> str:
                f"--- **التفاصيل** ---\n")
     report_lines.append(summary)
     
-    # Second loop to build report lines
     for i, item in enumerate(portfolio):
         quantity = Decimal(item['quantity']); avg_price = Decimal(item['avg_price'])
         investment_cost = quantity * avg_price
@@ -543,7 +564,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"فشل إرسال التقرير اليومي للمستخدم {user_id}: {e}")
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Check global alerts
     conn = get_db_connection();
     if not conn: return
     try:
@@ -555,7 +575,7 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             if last_value_str is None or last_check_time is None:
                 current_value = await get_portfolio_value(user_id); db_update_last_portfolio_value(user_id, current_value); continue
-            if datetime.now(ZoneInfo("UTC")) - last_check_time < timedelta(hours=23, minutes=55): continue
+            if last_check_time and (datetime.now(ZoneInfo("UTC")) - last_check_time < timedelta(hours=23, minutes=55)): continue
             last_value = Decimal(last_value_str); current_value = await get_portfolio_value(user_id)
             if last_value == 0: continue
             percentage_change = abs((current_value - last_value) / last_value * 100)
@@ -572,7 +592,6 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"فشل فحص تنبيه المحفظة للمستخدم {user_id}: {e}")
 
-    # Check coin-specific alerts
     coins_to_check = db_get_coins_for_alert_check()
     for coin in coins_to_check:
         try:
@@ -594,10 +613,10 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
                                  f"▪️ السعر السابق: `{format_price(last_price)}`\n"
                                  f"▪️ السعر الحالي: `{format_price(current_price)}`")
                 await context.bot.send_message(chat_id=coin['user_id'], text=alert_message, parse_mode=ParseMode.MARKDOWN)
-                db_set_coin_alert(coin['id'], threshold, current_price) # Update last price after alert
+                db_set_coin_alert(coin['id'], threshold, current_price)
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"فشل فحص تنبيه العملة {coin['symbol']}: {e}")
+            logger.error(f"فشل فحص تنبيه العملة {coin['symbol']} for user {coin['user_id']}: {e}")
 
 # --- Add Coin Conversation ---
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -773,8 +792,8 @@ def main() -> None:
         states={
             CHOOSE_SETTING: [
                 MessageHandler(filters.Regex("^تبديل حالة التنبيهات"), toggle_alerts),
-                MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
-                MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
+                MessageHandler(filters.rules.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
+                MessageHandler(filters.rules.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
             ],
             SET_GLOBAL_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_global_threshold)],
             SELECT_COIN_ALERT: [CallbackQueryHandler(select_coin_alert_callback)],
