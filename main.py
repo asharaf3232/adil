@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.2.1 - Patched"
+BOT_VERSION = "v5.3.0 - Edit Feature"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -157,12 +157,22 @@ def init_database():
         if conn: conn.close()
 
 
-# --- بقية الكود ---
+# --- States & Keyboards ---
 (EXCHANGE, SYMBOL, QUANTITY, PRICE, SET_GLOBAL_ALERT, 
  SELECT_COIN_ALERT, SET_COIN_ALERT) = range(7)
-REMOVE_ID = range(7, 8)
+(REMOVE_ID, EDIT_ID, CHOOSE_EDIT_FIELD, GET_NEW_QUANTITY, GET_NEW_PRICE) = range(7, 12)
+
 exchanges = {}
 
+MAIN_KEYBOARD = [
+    [KeyboardButton("📊 عرض المحفظة")],
+    [KeyboardButton("➕ إضافة عملة"), KeyboardButton("🗑️ حذف عملة")],
+    [KeyboardButton("✏️ تعديل عملة")],
+    [KeyboardButton("⚙️ الإعدادات"), KeyboardButton("❓ مساعدة")]
+]
+MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
+
+# --- Post-Init & Shutdown ---
 async def post_init(application: Application):
     global exchanges
     exchange_ids = ['binance', 'okx', 'kucoin', 'gateio', 'bybit', 'mexc']
@@ -196,8 +206,7 @@ async def post_shutdown(application: Application, instance_id: str):
             logger.info(f"تم إغلاق الاتصال بمنصة {ex_id}.")
         except: pass
 
-MAIN_KEYBOARD = [[KeyboardButton("📊 عرض المحفظة")],[KeyboardButton("➕ إضافة عملة"), KeyboardButton("🗑️ حذف عملة")],[KeyboardButton("⚙️ الإعدادات"), KeyboardButton("❓ مساعدة")]]
-MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
+# --- Helper Functions ---
 def format_price(price_decimal):
     if price_decimal is None: return "N/A"
     price_decimal = Decimal(price_decimal)
@@ -206,6 +215,8 @@ def format_price(price_decimal):
     if price_decimal < Decimal('0.01'): return f"${price_decimal:,.8f}".rstrip('0').rstrip('.')
     return f"${price_decimal:,.4f}"
 def format_quantity(quantity_decimal): return f"{Decimal(quantity_decimal).normalize()}"
+
+# --- Database Functions ---
 def db_add_or_update_coin(user_id, symbol, exchange, quantity, price):
     conn = get_db_connection()
     if not conn: return
@@ -223,6 +234,7 @@ def db_add_or_update_coin(user_id, symbol, exchange, quantity, price):
                 cur.execute("INSERT INTO portfolio (user_id, symbol, exchange, quantity, avg_price) VALUES (%s, %s, %s, %s, %s)",(user_id, symbol.upper(), exchange.lower(), str(quantity_dec), str(price_dec)))
         conn.commit()
     finally: conn.close()
+
 def db_get_portfolio(user_id):
     conn = get_db_connection();
     if not conn: return []
@@ -235,6 +247,39 @@ def db_get_portfolio(user_id):
                 portfolio.append({'id': row[0], 'symbol': row[1], 'exchange': row[2], 'quantity': row[3], 'avg_price': row[4], 'alert_threshold': row[5]})
     finally: conn.close()
     return portfolio
+
+def db_get_coin_by_id(coin_id, user_id):
+    conn = get_db_connection()
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, quantity, avg_price FROM portfolio WHERE id = %s AND user_id = %s", (coin_id, user_id))
+            result = cur.fetchone()
+            if result:
+                return {'symbol': result[0], 'quantity': result[1], 'avg_price': result[2]}
+            return None
+    finally:
+        if conn: conn.close()
+
+def db_update_coin_details(coin_id, user_id, new_quantity=None, new_avg_price=None):
+    conn = get_db_connection()
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            if new_quantity is not None:
+                cur.execute("UPDATE portfolio SET quantity = %s WHERE id = %s AND user_id = %s",
+                            (str(Decimal(new_quantity)), coin_id, user_id))
+            elif new_avg_price is not None:
+                cur.execute("UPDATE portfolio SET avg_price = %s WHERE id = %s AND user_id = %s",
+                            (str(Decimal(new_avg_price)), coin_id, user_id))
+            else:
+                return False
+            updated_rows = cur.rowcount
+        conn.commit()
+        return updated_rows > 0
+    finally:
+        if conn: conn.close()
+
 def db_remove_coin(coin_id, user_id):
     conn = get_db_connection();
     if not conn: return False
@@ -305,6 +350,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(f"أهلاً بك يا {user.mention_html()}!", reply_markup=MAIN_REPLY_MARKUP)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("استخدم الأزرار بالأسفل لإدارة محفظتك.", reply_markup=MAIN_REPLY_MARKUP)
+# --- Settings Conversation ---
 async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     settings = db_get_or_create_settings(user_id)
@@ -385,6 +431,8 @@ async def received_coin_threshold(update: Update, context: ContextTypes.DEFAULT_
     except ValueError:
         await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال رقم بين 0 و 100.")
         return SET_COIN_ALERT
+
+# --- Portfolio Logic ---
 async def fetch_price(exchange_id, symbol):
     exchange = exchanges.get(exchange_id)
     if not exchange: return None
@@ -546,6 +594,7 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"فشل فحص تنبيه العملة {coin['symbol']}: {e}")
 
+# --- Add Coin Conversation ---
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_keyboard = [list(exchanges.keys())[i:i + 3] for i in range(0, len(exchanges.keys()), 3)]
     await update.message.reply_text('**الخطوة 1 من 4:** اختر منصة الشراء.', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
@@ -580,6 +629,8 @@ async def received_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception: await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال السعر كرقم موجب."); return PRICE
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear(); await update.message.reply_text("تم إلغاء العملية.", reply_markup=MAIN_REPLY_MARKUP); return ConversationHandler.END
+
+# --- Remove Coin Conversation ---
 async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("لحذف عملية، أرسل رقم الـ ID الخاص بها.", reply_markup=ReplyKeyboardRemove()); return REMOVE_ID
 async def received_remove_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -592,9 +643,89 @@ async def received_remove_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"لم يتم العثور على عملية بالرقم `{coin_id_to_remove}`.", reply_markup=MAIN_REPLY_MARKUP)
     except ValueError: await update.message.reply_text("إدخال غير صالح. أرسل رقم فقط.", reply_markup=MAIN_REPLY_MARKUP)
     return ConversationHandler.END
+
+# --- Edit Coin Conversation ---
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("لتعديل عملة، أرسل رقم الـ ID الخاص بها.", reply_markup=ReplyKeyboardRemove()); return EDIT_ID
+
+async def received_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    try:
+        coin_id = int(update.message.text)
+        coin = db_get_coin_by_id(coin_id, user_id)
+        if coin:
+            context.user_data['edit_coin_id'] = coin_id
+            text = (f"**العملة المحددة:** {coin['symbol']}\n"
+                    f"الكمية الحالية: `{format_quantity(coin['quantity'])}`\n"
+                    f"سعر الشراء الحالي: `{format_price(coin['avg_price'])}`\n\n"
+                    "ماذا تريد أن تعدل؟")
+            keyboard = [
+                [InlineKeyboardButton("✏️ تعديل الكمية", callback_data='edit_quantity')],
+                [InlineKeyboardButton("💰 تعديل السعر", callback_data='edit_price')]
+            ]
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            return CHOOSE_EDIT_FIELD
+        else:
+            await update.message.reply_text(f"لم يتم العثور على عملة بالرقم `{coin_id}`.", reply_markup=MAIN_REPLY_MARKUP)
+            return ConversationHandler.END
+    except (ValueError, TypeError):
+        await update.message.reply_text("إدخال غير صالح. أرسل رقم ID صحيح.", reply_markup=MAIN_REPLY_MARKUP)
+        return ConversationHandler.END
+
+async def choose_edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'edit_quantity':
+        await query.edit_message_text("أرسل الكمية الجديدة.")
+        return GET_NEW_QUANTITY
+    elif query.data == 'edit_price':
+        await query.edit_message_text("أرسل متوسط سعر الشراء الجديد.")
+        return GET_NEW_PRICE
+    return ConversationHandler.END
+
+async def received_new_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        new_quantity = Decimal(update.message.text)
+        if new_quantity <= 0: raise ValueError()
+        
+        user_id = update.effective_user.id
+        coin_id = context.user_data['edit_coin_id']
+        
+        if db_update_coin_details(coin_id, user_id, new_quantity=new_quantity):
+            await update.message.reply_text("✅ تم تحديث الكمية بنجاح.", reply_markup=MAIN_REPLY_MARKUP)
+        else:
+            await update.message.reply_text("❌ فشل تحديث الكمية.", reply_markup=MAIN_REPLY_MARKUP)
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception:
+        await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال الكمية كرقم موجب.")
+        return GET_NEW_QUANTITY
+
+async def received_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        new_price = Decimal(update.message.text)
+        if new_price <= 0: raise ValueError()
+        
+        user_id = update.effective_user.id
+        coin_id = context.user_data['edit_coin_id']
+        
+        if db_update_coin_details(coin_id, user_id, new_avg_price=new_price):
+            await update.message.reply_text("✅ تم تحديث السعر بنجاح.", reply_markup=MAIN_REPLY_MARKUP)
+        else:
+            await update.message.reply_text("❌ فشل تحديث السعر.", reply_markup=MAIN_REPLY_MARKUP)
+            
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception:
+        await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال السعر كرقم موجب.")
+        return GET_NEW_PRICE
+
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم العودة للقائمة الرئيسية.", reply_markup=MAIN_REPLY_MARKUP); return ConversationHandler.END
 
+# --- Main Application Setup ---
 def main() -> None:
     sync_time.sleep(random.uniform(0, 2))
     if not all([TELEGRAM_BOT_TOKEN, DATABASE_URL]):
@@ -622,6 +753,16 @@ def main() -> None:
     
     add_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)], states={EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)], SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)], QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_quantity)], PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_price)]}, fallbacks=[CommandHandler("cancel", cancel)])
     remove_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)], states={REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]}, fallbacks=[CommandHandler("cancel", cancel)])
+    edit_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^✏️ تعديل عملة$"), edit_start)],
+        states={
+            EDIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_id)],
+            CHOOSE_EDIT_FIELD: [CallbackQueryHandler(choose_edit_field_callback)],
+            GET_NEW_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_new_quantity)],
+            GET_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_new_price)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
     settings_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_start)],
         states={
@@ -635,6 +776,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(add_conv)
     application.add_handler(remove_conv)
+    application.add_handler(edit_conv)
     application.add_handler(settings_conv)
     application.add_handler(MessageHandler(filters.Regex("^📊 عرض المحفظة$"), portfolio_command))
     application.add_handler(MessageHandler(filters.Regex("^❓ مساعدة$"), help_command))
@@ -647,3 +789,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
