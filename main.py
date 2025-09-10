@@ -5,7 +5,7 @@ import os
 import sqlite3
 import logging
 import asyncio
-import psycopg2
+import psycopg2 
 from decimal import Decimal, getcontext
 from datetime import time, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -23,13 +23,12 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v3.0.0 - Professional Edition"
-getcontext().prec = 28 # زيادة الدقة للعمليات الحسابية
+BOT_VERSION = "v3.0.1 - Stability Fix"
+getcontext().prec = 28
 
 # --- إعدادات البوت الأساسية ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-# [تم التطوير هنا] جلب رقم حساب المدير لإرسال رسالة بدء التشغيل
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 
 # --- إعداد مسجل الأحداث (Logger) ---
@@ -52,7 +51,6 @@ def init_database():
     if not conn: return
     try:
         with conn.cursor() as cur:
-            # جدول المحفظة
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS portfolio (
                     id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, symbol TEXT NOT NULL,
@@ -60,7 +58,6 @@ def init_database():
                     UNIQUE(user_id, symbol, exchange)
                 )
             ''')
-            # [تم التطوير هنا] جدول إعدادات المستخدمين للتنبيهات وغيرها
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id BIGINT PRIMARY KEY,
@@ -98,14 +95,14 @@ async def post_init(application: Application):
     cairo_tz = ZoneInfo("Africa/Cairo")
     report_time = time(hour=23, minute=55, tzinfo=cairo_tz) 
     
-    # جدولة المهام الدورية
-    application.job_queue.run_daily(send_daily_report, time=report_time, name="daily_report")
-    # [تم التطوير هنا] جدولة فحص التنبيهات كل 5 دقائق
-    application.job_queue.run_repeating(check_alerts, interval=timedelta(minutes=5), name="price_alerts")
-    
-    logger.info(f"تم جدولة المهام الدورية بنجاح.")
+    if application.job_queue:
+        application.job_queue.run_daily(send_daily_report, time=report_time, name="daily_report")
+        application.job_queue.run_repeating(check_alerts, interval=timedelta(minutes=5), name="price_alerts")
+        logger.info(f"تم جدولة المهام الدورية بنجاح.")
+    else:
+        logger.warning("JobQueue غير متاح، لن يتم جدولة المهام الدورية.")
 
-    # [تم التطوير هنا] إرسال رسالة بدء التشغيل للمدير
+
     if ADMIN_CHAT_ID:
         try:
             startup_message = f"🚀 **البوت يعمل الآن!**\n\n*الإصدار:* `{BOT_VERSION}`"
@@ -139,7 +136,6 @@ def format_quantity(quantity_decimal):
     return f"{quantity_decimal.normalize()}"
 
 # --- دوال التعامل مع قاعدة البيانات (PostgreSQL) ---
-# ... (جميع دوال db السابقة تعمل كما هي مع PostgreSQL) ...
 def db_add_or_update_coin(user_id, symbol, exchange, quantity, price):
     conn = get_db_connection()
     if not conn: return
@@ -234,9 +230,15 @@ def db_update_last_portfolio_value(user_id, value):
 # --- الأوامر الرئيسية ومعالجات الأزرار ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    db_get_or_create_settings(user.id) # إنشاء سجل إعدادات للمستخدم الجديد
+    db_get_or_create_settings(user.id)
     welcome_message = f"أهلاً بك يا {user.mention_html()} في بوت تتبع المحفظة!\n\nاختر أحد الخيارات من القائمة بالأسفل للبدء."
     await update.message.reply_html(welcome_message, reply_markup=MAIN_REPLY_MARKUP)
+
+# [تم الإصلاح هنا] إعادة إضافة دالة المساعدة
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    help_text = "استخدم الأزرار بالأسفل لإدارة محفظتك أو ضبط إعدادات التنبيهات."
+    await update.message.reply_text(help_text, reply_markup=MAIN_REPLY_MARKUP)
+
 
 # --- محادثة الإعدادات ---
 async def settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,7 +263,7 @@ async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_status = not settings['alerts_enabled']
     db_update_alert_settings(user_id, new_status, settings['global_alert_threshold'])
     await update.message.reply_text(f"✅ تم تحديث حالة التنبيهات بنجاح.")
-    await settings_start(update, context) # عرض القائمة المحدثة
+    await settings_start(update, context)
 
 async def change_threshold_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("أرسل النسبة المئوية الجديدة للتنبيه (مثال: `5` لـ 5%).", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
@@ -295,25 +297,21 @@ async def fetch_price(exchange_id, symbol):
     return None
 
 async def get_portfolio_value(user_id: int):
-    """يحسب القيمة الإجمالية الحالية للمحفظة."""
     portfolio = db_get_portfolio(user_id)
     if not portfolio: return Decimal('0.0')
-
     tasks = [fetch_price(item['exchange'], item['symbol']) for item in portfolio]
     results = await asyncio.gather(*tasks)
-    
     total_value = Decimal('0.0')
     for i, item in enumerate(portfolio):
         current_price = results[i]
         quantity = Decimal(item['quantity'])
         if current_price:
             total_value += quantity * Decimal(str(current_price))
-        else: # إذا فشل جلب السعر، استخدم سعر الشراء كقيمة تقديرية
+        else:
             total_value += quantity * Decimal(item['avg_price'])
     return total_value
 
 async def generate_portfolio_report(user_id: int) -> str:
-    # ... (الكود لم يتغير) ...
     portfolio = db_get_portfolio(user_id)
     if not portfolio: return "محفظتك فارغة حالياً."
     tasks = [fetch_price(item['exchange'], item['symbol']) for item in portfolio]
@@ -363,13 +361,11 @@ async def generate_portfolio_report(user_id: int) -> str:
         report_lines.append("---")
     return "\n".join(report_lines)
 
-
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     msg = await update.message.reply_text("⏳ جارٍ إعداد التقرير...")
     report_text = await generate_portfolio_report(user_id)
     await msg.edit_text(report_text, parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_REPLY_MARKUP)
-
 
 # --- دوال التقارير والتنبيهات الدورية ---
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -390,7 +386,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error(f"فشل إرسال التقرير اليومي للمستخدم {user_id}: {e}")
 
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """[ميزة جديدة] تفحص محافظ المستخدمين وترسل تنبيهات عند تغير الأسعار."""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -398,26 +393,18 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             cur.execute("SELECT user_id, global_alert_threshold, last_portfolio_value, last_check_time FROM user_settings WHERE alerts_enabled = TRUE")
             users_to_check = cur.fetchall()
     finally: conn.close()
-
     for user_id, threshold, last_value_str, last_check_time in users_to_check:
         try:
-            # تجنب إرسال تنبيهات للمحافظ الجديدة
             if last_value_str is None or last_check_time is None:
                 current_value = await get_portfolio_value(user_id)
                 db_update_last_portfolio_value(user_id, current_value)
                 continue
-
-            # السماح بمرور 24 ساعة على الأقل قبل إرسال تنبيه جديد
             if datetime.now(ZoneInfo("UTC")) - last_check_time < timedelta(hours=23, minutes=55):
                  continue
-
             last_value = Decimal(last_value_str)
             current_value = await get_portfolio_value(user_id)
-            
-            if last_value == 0: continue # تجنب القسمة على صفر
-
+            if last_value == 0: continue
             percentage_change = abs((current_value - last_value) / last_value * 100)
-
             if percentage_change >= Decimal(threshold):
                 direction_text = "ارتفاع" if current_value > last_value else "انخفاض"
                 direction_icon = "📈" if current_value > last_value else "📉"
@@ -428,15 +415,12 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"▪️ القيمة الحالية: `${current_value:,.2f}`"
                 )
                 await context.bot.send_message(chat_id=user_id, text=alert_message, parse_mode=ParseMode.MARKDOWN)
-                # تحديث القيمة والوقت بعد إرسال التنبيه
                 db_update_last_portfolio_value(user_id, current_value)
-            
             await asyncio.sleep(1)
-
         except Exception as e:
             logger.error(f"فشل فحص التنبيهات للمستخدم {user_id}: {e}")
 
-# ... بقية دوال المحادثات (add, remove) لم تتغير...
+# ... دوال المحادثات (add, remove) ...
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_keyboard = [list(exchanges.keys())[i:i + 3] for i in range(0, len(exchanges.keys()), 3)]
     await update.message.reply_text('**الخطوة 1 من 4:** اختر منصة الشراء.', reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
@@ -468,7 +452,6 @@ async def received_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_id = update.effective_user.id
         user_data = context.user_data
         db_add_or_update_coin(user_id, user_data['symbol'], user_data['exchange'], user_data['quantity'], price)
-        # بعد الإضافة، قم بتحديث قيمة المحفظة الأولية لبدء تتبع التنبيهات
         current_value = await get_portfolio_value(user_id)
         db_update_last_portfolio_value(user_id, current_value)
         await update.message.reply_text(f"✅ **تمت إضافة/تحديث {user_data['symbol']} بنجاح!**", reply_markup=MAIN_REPLY_MARKUP, parse_mode=ParseMode.MARKDOWN)
@@ -499,7 +482,6 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تم العودة للقائمة الرئيسية.", reply_markup=MAIN_REPLY_MARKUP)
     return ConversationHandler.END
 
-
 def main() -> None:
     if not all([TELEGRAM_BOT_TOKEN, DATABASE_URL]):
         logger.critical("FATAL ERROR: لم يتم تعيين جميع متغيرات البيئة المطلوبة (TOKEN, DATABASE_URL).")
@@ -509,27 +491,9 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     # --- معالجات المحادثات ---
-    add_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)],
-        states={
-            EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)],
-            SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)],
-            QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_quantity)],
-            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_price)],
-        }, fallbacks=[CommandHandler("cancel", cancel)])
-
-    remove_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)],
-        states={REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]},
-        fallbacks=[CommandHandler("cancel", cancel)])
-    
-    settings_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_start)],
-        states={
-            SET_ALERT_THRESHOLD: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_threshold)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^🔙 العودة للقائمة الرئيسية$"), back_to_main), CommandHandler("cancel", cancel)]
-    )
+    add_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)], states={EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)], SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)], QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_quantity)], PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_price)]}, fallbacks=[CommandHandler("cancel", cancel)])
+    remove_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)], states={REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]}, fallbacks=[CommandHandler("cancel", cancel)])
+    settings_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_start)], states={SET_ALERT_THRESHOLD: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_threshold)]}, fallbacks=[MessageHandler(filters.Regex("^🔙 العودة للقائمة الرئيسية$"), back_to_main), CommandHandler("cancel", cancel)])
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(add_conv)
