@@ -60,7 +60,9 @@ EXCHANGE, SYMBOL, QUANTITY, PRICE = range(4)
 # --- متغير عالمي لتخزين كائنات المنصات ---
 exchanges = {}
 
-async def initialize_exchanges():
+# --- [تم التعديل هنا] ---
+# أضفنا (application: Application) لاستقبال المعامل الإضافي من المكتبة
+async def initialize_exchanges(application: Application):
     """يقوم بتهيئة الاتصال بالمنصات عند بدء تشغيل البوت."""
     global exchanges
     # يمكنك إضافة المزيد من المنصات هنا
@@ -73,7 +75,9 @@ async def initialize_exchanges():
         except Exception as e:
             logger.error(f"فشل الاتصال بمنصة {ex_id}: {e}")
 
-async def close_exchanges():
+# --- [تم التعديل هنا] ---
+# أضفنا (application: Application) لاستقبال المعامل الإضافي من المكتبة
+async def close_exchanges(application: Application):
     """يغلق جميع اتصالات المنصات عند إيقاف البوت."""
     for ex_id, ex_instance in exchanges.items():
         try:
