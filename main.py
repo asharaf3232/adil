@@ -441,9 +441,8 @@ async def generate_portfolio_report(user_id: int) -> str:
         quantity = Decimal(item['quantity']); avg_price = Decimal(item['avg_price'])
         investment_cost = quantity * avg_price
         
-        line = (f"🆔 `{item['id']}` | **{item['symbol']}** | `{item['exchange'].capitalize()}`\n"
-                f"الكمية: `{format_quantity(quantity)}`\n"
-                f"متوسط الشراء: `{format_price(avg_price)}`")
+        line = (f"*{i + 1}.* 🆔 `{item['id']}` | **{item['symbol']}** | `{item['exchange'].capitalize()}`\n"
+                f"الكمية: `{format_quantity(quantity)}`")
         
         current_price = results[i]
         if current_price:
@@ -453,13 +452,13 @@ async def generate_portfolio_report(user_id: int) -> str:
             pnl_percent = (pnl / investment_cost * 100) if investment_cost > 0 else 0
             pnl_icon = "📈" if pnl >= 0 else "📉"
             
-            line += (f"\n\n💰 **تكلفة الشراء:** `{format_price(investment_cost)}`"
-                     f"\n💵 **القيمة الحالية:** `{format_price(current_value)}`"
-                     f"\n{pnl_icon} **الربح/الخسارة:** `{format_price(pnl)} ({pnl_percent:+.2f}%)`")
+            line += (f"\n- سعر الشراء: `{format_price(avg_price)}` (التكلفة: `{format_price(investment_cost)}`)\n"
+                     f"- السعر الحالي: `{format_price(current_price_dec)}` (القيمة: `{format_price(current_value)}`)\n"
+                     f"{pnl_icon} الربح/الخسارة: `{format_price(pnl)} ({pnl_percent:+.2f}%)`")
         else:
-            line += (f"\n\n💰 **تكلفة الشراء:** `{format_price(investment_cost)}`"
-                     f"\n💵 **القيمة الحالية:** `غير متاحة`"
-                     f"\n📉 **الربح/الخسارة:** `غير متاح`")
+            line += (f"\n- سعر الشراء: `{format_price(avg_price)}` (التكلفة: `{format_price(investment_cost)}`)\n"
+                     f"- السعر الحالي: `غير متاح`\n"
+                     f"📉 الربح/الخسارة: `غير متاح`")
         
         report_lines.append(line)
         report_lines.append("---")
@@ -648,4 +647,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
