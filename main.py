@@ -29,7 +29,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.4.1 - Crash Fix"
+BOT_VERSION = "v5.5.1 - Bybit API Fix"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -161,7 +161,7 @@ def init_database():
 (EXCHANGE, SYMBOL, QUANTITY, PRICE, SET_GLOBAL_ALERT, 
  SELECT_COIN_ALERT, SET_COIN_ALERT) = range(7)
 (REMOVE_ID, EDIT_ID, CHOOSE_EDIT_FIELD, GET_NEW_QUANTITY, GET_NEW_PRICE, 
- CHOOSE_SETTING) = range(7, 13)
+ CHOOSE_SETTING, BULK_IMPORT) = range(7, 14)
 
 
 exchanges = {}
@@ -169,7 +169,7 @@ exchanges = {}
 MAIN_KEYBOARD = [
     [KeyboardButton("📊 عرض المحفظة")],
     [KeyboardButton("➕ إضافة عملة"), KeyboardButton("🗑️ حذف عملة")],
-    [KeyboardButton("✏️ تعديل عملة")],
+    [KeyboardButton("✏️ تعديل عملة"), KeyboardButton("📥 استيراد محفظة")],
     [KeyboardButton("⚙️ الإعدادات"), KeyboardButton("❓ مساعدة")]
 ]
 MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
@@ -445,19 +445,19 @@ async def fetch_price(exchange_id, symbol):
         logger.error(f"Exchange {exchange_id} not initialized.")
         return None
     
-    base, quote = symbol.split('/')
-    symbols_to_try = [
-        symbol,          # Example: COOKIE/USDT
-        f"{base}{quote}", # Example: COOKIEUSDT
-    ]
-    
+    symbols_to_try = [symbol]
+    if '/' in symbol:
+        symbols_to_try.append(symbol.replace('/', ''))
+
     for s in symbols_to_try:
         try:
             params = {}
+            # Bybit's V5 API requires the 'category' parameter for spot tickers
             if exchange_id == 'bybit':
-                params = {'type': 'spot'}
+                params = {'category': 'spot'}
 
             ticker = await exchange.fetch_ticker(s, params=params)
+            
             if ticker and 'last' in ticker and ticker['last'] is not None:
                 return ticker['last']
         except ccxt.BaseError as e:
@@ -746,74 +746,20 @@ async def received_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال السعر كرقم موجب.")
         return GET_NEW_PRICE
 
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("تم العودة للقائمة الرئيسية.", reply_markup=MAIN_REPLY_MARKUP); return ConversationHandler.END
+# --- Bulk Import Conversation ---
+async def import_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    instructions = """
+    **📥 استيراد محفظة جماعي**
 
-# --- Main Application Setup ---
-def main() -> None:
-    sync_time.sleep(random.uniform(0, 2))
-    if not all([TELEGRAM_BOT_TOKEN, DATABASE_URL]):
-        logger.critical("FATAL ERROR: متغيرات البيئة غير مكتملة.")
-        sys.exit(1)
+    ألصق قائمة العملات الخاصة بك هنا.
+    يجب أن يكون كل سطر لعملة واحدة بالتنسيق التالي:
+    `المنصة,رمز العملة,الكمية,متوسط سعر الشراء`
 
-    instance_id = str(uuid.uuid4())
+    **مثال:**
+    ```
+gateio,BITBOARD/USDT,18967,0.0009069
+bybit,COOKIE/USDT,96.78,0.66
+kucoin,POLC/USDT,1976,0.002095
     
-    init_database()
-    
-    if not acquire_lock(instance_id):
-        logger.info("لم يتم الحصول على القفل. سيتم إغلاق هذه النسخة.")
-        sys.exit(0)
-
-    shutdown_handler = functools.partial(post_shutdown, instance_id=instance_id)
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .post_shutdown(shutdown_handler)
-        .build()
-    )
-    application.bot_data["instance_id"] = instance_id
-    
-    add_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)], states={EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)], SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)], QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_quantity)], PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_price)]}, fallbacks=[CommandHandler("cancel", cancel)])
-    remove_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)], states={REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]}, fallbacks=[CommandHandler("cancel", cancel)])
-    edit_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^✏️ تعديل عملة$"), edit_start)],
-        states={
-            EDIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_id)],
-            CHOOSE_EDIT_FIELD: [CallbackQueryHandler(choose_edit_field_callback)],
-            GET_NEW_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_new_quantity)],
-            GET_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_new_price)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    settings_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_start)],
-        states={
-            CHOOSE_SETTING: [
-                MessageHandler(filters.Regex("^تبديل حالة التنبيهات"), toggle_alerts),
-                MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start),
-                MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start),
-            ],
-            SET_GLOBAL_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_global_threshold)],
-            SELECT_COIN_ALERT: [CallbackQueryHandler(select_coin_alert_callback)],
-            SET_COIN_ALERT: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_coin_threshold)],
-        },
-        fallbacks=[MessageHandler(filters.Regex("^🔙 العودة للقائمة الرئيسية$"), back_to_main), CommandHandler("cancel", cancel)]
-    )
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(add_conv)
-    application.add_handler(remove_conv)
-    application.add_handler(edit_conv)
-    application.add_handler(settings_conv)
-    application.add_handler(MessageHandler(filters.Regex("^📊 عرض المحفظة$"), portfolio_command))
-    application.add_handler(MessageHandler(filters.Regex("^❓ مساعدة$"), help_command))
-    
-    logger.info(f"... البوت قيد التشغيل (النسخة: {instance_id}) ...")
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
 
 
