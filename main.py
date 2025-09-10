@@ -412,17 +412,22 @@ async def generate_portfolio_report(user_id: int) -> str:
     results = await asyncio.gather(*tasks)
     total_portfolio_value = Decimal('0.0'); total_investment_cost = Decimal('0.0')
     report_lines = []
+    
+    # First loop to calculate totals
     for i, item in enumerate(portfolio):
         quantity = Decimal(item['quantity']); avg_price = Decimal(item['avg_price'])
         investment_cost = quantity * avg_price
         total_investment_cost += investment_cost
         current_price = results[i]
-        current_value = investment_cost
-        if current_price: current_value = quantity * Decimal(str(current_price))
+        current_value = investment_cost # Fallback to cost if price is unavailable
+        if current_price: 
+            current_value = quantity * Decimal(str(current_price))
         total_portfolio_value += current_value
+        
     total_pnl = total_portfolio_value - total_investment_cost
     total_pnl_percent = (total_pnl / total_investment_cost * 100) if total_investment_cost > 0 else 0
     total_pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+    
     summary = (f"**📊 ملخص المحفظة**\n\n"
                f"▪️ **رأس المال:** `{format_price(total_investment_cost)}`\n"
                f"▪️ **القيمة الحالية:** `{format_price(total_portfolio_value)}`\n"
@@ -430,23 +435,35 @@ async def generate_portfolio_report(user_id: int) -> str:
                f"`{format_price(total_pnl)} ({total_pnl_percent:+.2f}%)`\n\n"
                f"--- **التفاصيل** ---\n")
     report_lines.append(summary)
+    
+    # Second loop to build report lines
     for i, item in enumerate(portfolio):
         quantity = Decimal(item['quantity']); avg_price = Decimal(item['avg_price'])
         investment_cost = quantity * avg_price
+        
         line = (f"🆔 `{item['id']}` | **{item['symbol']}** | `{item['exchange'].capitalize()}`\n"
                 f"الكمية: `{format_quantity(quantity)}`\n"
                 f"متوسط الشراء: `{format_price(avg_price)}`")
+        
         current_price = results[i]
         if current_price:
-            current_price_dec = Decimal(str(current_price)); current_value = quantity * current_price_dec
+            current_price_dec = Decimal(str(current_price))
+            current_value = quantity * current_price_dec
             pnl = current_value - investment_cost
             pnl_percent = (pnl / investment_cost * 100) if investment_cost > 0 else 0
             pnl_icon = "📈" if pnl >= 0 else "📉"
-            line += (f"\nالسعر الحالي: `{format_price(current_price_dec)}`\n"
-                     f"القيمة الحالية: `{format_price(current_value)}`\n"
-                     f"{pnl_icon} الربح/الخسارة: `{format_price(pnl)} ({pnl_percent:+.2f}%)`")
-        else: line += f"\nالسعر الحالي: `غير متاح`"
-        report_lines.append(line); report_lines.append("---")
+            
+            line += (f"\n\n💰 **تكلفة الشراء:** `{format_price(investment_cost)}`"
+                     f"\n💵 **القيمة الحالية:** `{format_price(current_value)}`"
+                     f"\n{pnl_icon} **الربح/الخسارة:** `{format_price(pnl)} ({pnl_percent:+.2f}%)`")
+        else:
+            line += (f"\n\n💰 **تكلفة الشراء:** `{format_price(investment_cost)}`"
+                     f"\n💵 **القيمة الحالية:** `غير متاحة`"
+                     f"\n📉 **الربح/الخسارة:** `غير متاح`")
+        
+        report_lines.append(line)
+        report_lines.append("---")
+        
     return "\n".join(report_lines)
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -631,3 +648,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
