@@ -8,7 +8,7 @@ import asyncio
 from decimal import Decimal, ROUND_DOWN
 
 import ccxt.async_support as ccxt
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,7 +20,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # --- إعدادات البوت الأساسية ---
-# هام: استبدل 'YOUR_TELEGRAM_BOT_TOKEN' بالتوكن الخاص ببوتك الذي حصلت عليه من BotFather
+# هام: هذا المتغير تتم قراءته من إعدادات منصة الاستضافة (Environment Variable)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 
 # --- إعداد مسجل الأحداث (Logger) ---
@@ -54,18 +54,20 @@ def init_database():
     except Exception as e:
         logger.error(f"حدث خطأ أثناء تهيئة قاعدة البيانات: {e}")
 
-# --- حالات المحادثة لإضافة عملة ---
+# --- حالات المحادثات ---
+# لإضافة عملة
 EXCHANGE, SYMBOL, QUANTITY, PRICE = range(4)
+# لحذف عملة
+REMOVE_ID = range(4, 5)
+
 
 # --- متغير عالمي لتخزين كائنات المنصات ---
 exchanges = {}
 
-# --- [تم التعديل هنا] ---
-# أضفنا (application: Application) لاستقبال المعامل الإضافي من المكتبة
+# --- دوال بدء وإيقاف تشغيل البوت ---
 async def initialize_exchanges(application: Application):
     """يقوم بتهيئة الاتصال بالمنصات عند بدء تشغيل البوت."""
     global exchanges
-    # يمكنك إضافة المزيد من المنصات هنا
     exchange_ids = ['binance', 'okx', 'kucoin', 'gateio', 'bybit', 'mexc']
     for ex_id in exchange_ids:
         try:
@@ -75,8 +77,6 @@ async def initialize_exchanges(application: Application):
         except Exception as e:
             logger.error(f"فشل الاتصال بمنصة {ex_id}: {e}")
 
-# --- [تم التعديل هنا] ---
-# أضفنا (application: Application) لاستقبال المعامل الإضافي من المكتبة
 async def close_exchanges(application: Application):
     """يغلق جميع اتصالات المنصات عند إيقاف البوت."""
     for ex_id, ex_instance in exchanges.items():
@@ -86,37 +86,34 @@ async def close_exchanges(application: Application):
         except Exception as e:
             logger.error(f"خطأ أثناء إغلاق اتصال {ex_id}: {e}")
 
+
+# --- لوحة المفاتيح الرئيسية (الأزرار التفاعلية) ---
+MAIN_KEYBOARD = [
+    [KeyboardButton("📊 عرض المحفظة")],
+    [KeyboardButton("➕ إضافة عملة"), KeyboardButton("🗑️ حذف عملة")],
+    [KeyboardButton("⚙️ الإعدادات"), KeyboardButton("❓ مساعدة")],
+]
+MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
+
 # --- دوال التعامل مع قاعدة البيانات ---
 
 def db_add_or_update_coin(user_id, symbol, exchange, quantity, price):
     """تضيف عملة جديدة أو تحدث كمية وسعر عملة موجودة."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
-    # التحقق مما إذا كانت العملة موجودة بالفعل
     cursor.execute("SELECT quantity, avg_price FROM portfolio WHERE user_id = ? AND symbol = ? AND exchange = ?",
                    (user_id, symbol, exchange))
     result = cursor.fetchone()
 
     if result:
-        # تحديث الكمية ومتوسط السعر
         old_quantity, old_avg_price = result
         total_quantity = old_quantity + quantity
         new_avg_price = ((old_quantity * old_avg_price) + (quantity * price)) / total_quantity
-        
-        cursor.execute("""
-            UPDATE portfolio 
-            SET quantity = ?, avg_price = ? 
-            WHERE user_id = ? AND symbol = ? AND exchange = ?
-        """, (total_quantity, new_avg_price, user_id, symbol, exchange))
-        
+        cursor.execute("UPDATE portfolio SET quantity = ?, avg_price = ? WHERE user_id = ? AND symbol = ? AND exchange = ?",
+                       (total_quantity, new_avg_price, user_id, symbol, exchange))
     else:
-        # إضافة عملة جديدة
-        cursor.execute("""
-            INSERT INTO portfolio (user_id, symbol, exchange, quantity, avg_price) 
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, symbol.upper(), exchange.lower(), quantity, price))
-        
+        cursor.execute("INSERT INTO portfolio (user_id, symbol, exchange, quantity, avg_price) VALUES (?, ?, ?, ?, ?)",
+                       (user_id, symbol.upper(), exchange.lower(), quantity, price))
     conn.commit()
     conn.close()
 
@@ -140,38 +137,44 @@ def db_remove_coin(coin_id, user_id):
     conn.close()
     return rows_deleted > 0
 
-# --- أوامر التليجرام ---
+# --- الأوامر الرئيسية و معالجات الأزرار ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل رسالة ترحيبية عند بدء البوت."""
+    """يرسل رسالة ترحيبية ويعرض لوحة المفاتيح الرئيسية."""
     user = update.effective_user
-    welcome_message = (
-        f"أهلاً بك يا {user.mention_html()} في بوت تتبع المحفظة!\n\n"
-        "يمكنني مساعدتك في تتبع جميع عملاتك الرقمية الموزعة على عدة منصات في مكان واحد.\n\n"
-        "**الأوامر المتاحة:**\n"
-        "/add - لإضافة عملة جديدة لمحفظتك\n"
-        "/portfolio - لعرض محفظتك الحالية مع الأرباح والخسائر\n"
-        "/remove - لحذف عملة من محفظتك\n"
-        "/help - لعرض هذه الرسالة مرة أخرى"
-    )
-    await update.message.reply_html(welcome_message)
+    welcome_message = f"أهلاً بك يا {user.mention_html()} في بوت تتبع المحفظة!\n\nاختر أحد الخيارات من القائمة بالأسفل للبدء."
+    await update.message.reply_html(welcome_message, reply_markup=MAIN_REPLY_MARKUP)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعرض رسالة المساعدة."""
     help_text = (
-        "**الأوامر المتاحة:**\n\n"
-        "**/add**\n"
-        "لبدء عملية إضافة عملة جديدة لمحفظتك. سيقوم البوت بسؤالك عن التفاصيل خطوة بخطوة.\n\n"
-        "**/portfolio**\n"
+        "**❓ دليل المساعدة**\n\n"
+        "
+"**📊 عرض المحفظة**\n"
         "لعرض تقرير مفصل عن محفظتك، يتضمن الأسعار الحية، القيمة الإجمالية، والأرباح والخسائر العائمة لكل عملة.\n\n"
-        "**/remove**\n"
-        "لحذف عملة من محفظتك. سيطلب منك البوت رقم ID الخاص بالعملية الذي يظهر في تقرير المحفظة.\n\n"
+        "**➕ إضافة عملة**\n"
+        "لبدء عملية إضافة عملة جديدة لمحفظتك. سيقوم البوت بسؤالك عن التفاصيل خطوة بخطوة.\n\n"
+        "**🗑️ حذف عملة**\n"
+        "لحذف عملية شراء من محفظتك. سيطلب منك البوت رقم ID الخاص بالعملية الذي يظهر في تقرير المحفظة.\n\n"
         "**/cancel**\n"
-        "لإلغاء أي عملية جارية (مثل عملية إضافة عملة)."
+        "لإلغاء أي عملية جارية في أي وقت."
     )
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_REPLY_MARKUP)
+    
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يعرض قائمة الإعدادات (ميزة مستقبلية)."""
+    settings_text = (
+        "**⚙️ الإعدادات**\n\n"
+        "هنا ستتمكن قريباً من ضبط الإعدادات المتقدمة:\n"
+        "- تفعيل/تعطيل التقارير اليومية.\n"
+        "- ضبط تنبيهات الأسعار المخصصة.\n\n"
+        "*هذه الميزات قيد التطوير حالياً.*"
+    )
+    await update.message.reply_text(settings_text, parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_REPLY_MARKUP)
 
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# --- محادثة إضافة عملة ---
+
+async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """يبدأ محادثة إضافة عملة جديدة."""
     reply_keyboard = [list(exchanges.keys())[i:i + 3] for i in range(0, len(exchanges.keys()), 3)]
     await update.message.reply_text(
@@ -183,77 +186,50 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return EXCHANGE
 
 async def received_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """يخزن المنصة ويسأل عن رمز العملة."""
     exchange = update.message.text.lower()
     if exchange not in exchanges:
         await update.message.reply_text("منصة غير مدعومة. الرجاء اختيار واحدة من القائمة.")
         return EXCHANGE
-    
     context.user_data['exchange'] = exchange
     await update.message.reply_text(
         f"تم اختيار منصة: *{exchange}*\n\n"
-        "**الخطوة 2 من 4:** ما هو رمز العملة؟ (مثال: `BTC/USDT` أو `ETH/USDT`)",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode=ParseMode.MARKDOWN
+        "**الخطوة 2 من 4:** ما هو رمز العملة؟ (مثال: `BTC/USDT`)",
+        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN
     )
     return SYMBOL
 
 async def received_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """يخزن الرمز ويسأل عن الكمية."""
     symbol = update.message.text.upper()
-    
-    # تحقق بسيط من صيغة الرمز
     if '/' not in symbol:
         await update.message.reply_text("صيغة الرمز غير صحيحة. الرجاء إدخال الرمز بصيغة `COIN/PAIR` مثل `BTC/USDT`.")
         return SYMBOL
-
     context.user_data['symbol'] = symbol
-    await update.message.reply_text(
-        f"تم تحديد العملة: *{symbol}*\n\n"
-        "**الخطوة 3 من 4:** ما هي الكمية التي اشتريتها؟ (مثال: `0.5`)",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text(f"تم تحديد العملة: *{symbol}*\n\n**الخطوة 3 من 4:** ما هي الكمية؟", parse_mode=ParseMode.MARKDOWN)
     return QUANTITY
     
 async def received_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """يخزن الكمية ويسأل عن السعر."""
     try:
         quantity = float(update.message.text)
-        if quantity <= 0:
-            raise ValueError("Quantity must be positive.")
+        if quantity <= 0: raise ValueError()
         context.user_data['quantity'] = quantity
-        await update.message.reply_text(
-            f"الكمية: *{quantity}*\n\n"
-            "**الخطوة 4 من 4:** ما هو متوسط سعر الشراء؟ (مثال: `65000.5`)",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(f"الكمية: *{quantity}*\n\n**الخطوة 4 من 4:** ما هو متوسط سعر الشراء؟", parse_mode=ParseMode.MARKDOWN)
         return PRICE
     except ValueError:
         await update.message.reply_text("قيمة غير صالحة. الرجاء إدخال الكمية كرقم موجب.")
         return QUANTITY
 
 async def received_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """يخزن السعر ويضيف العملة لقاعدة البيانات."""
     try:
         price = float(update.message.text)
-        if price <= 0:
-            raise ValueError("Price must be positive.")
+        if price <= 0: raise ValueError()
         
         user_id = update.effective_user.id
         user_data = context.user_data
         
-        db_add_or_update_coin(
-            user_id,
-            user_data['symbol'],
-            user_data['exchange'],
-            user_data['quantity'],
-            price
-        )
-
+        db_add_or_update_coin(user_id, user_data['symbol'], user_data['exchange'], user_data['quantity'], price)
         await update.message.reply_text(
-            f"✅ **تمت إضافة/تحديث عملة {user_data['symbol']} بنجاح!**\n\n"
-            "يمكنك الآن عرض محفظتك المحدثة باستخدام الأمر /portfolio.",
-            parse_mode=ParseMode.MARKDOWN
+            f"✅ **تمت إضافة/تحديث {user_data['symbol']} بنجاح!**",
+            reply_markup=MAIN_REPLY_MARKUP, parse_mode=ParseMode.MARKDOWN
         )
         user_data.clear()
         return ConversationHandler.END
@@ -262,25 +238,59 @@ async def received_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return PRICE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """يلغي المحادثة الحالية."""
+    """يلغي المحادثة الحالية ويعود للقائمة الرئيسية."""
     context.user_data.clear()
-    await update.message.reply_text("تم إلغاء العملية.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("تم إلغاء العملية.", reply_markup=MAIN_REPLY_MARKUP)
     return ConversationHandler.END
 
+# --- محادثة حذف عملة ---
+async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """يبدأ محادثة حذف عملة."""
+    await update.message.reply_text(
+        "لحذف عملية من محفظتك، يرجى إرسال رقم الـ ID الخاص بها.\n"
+        "يمكنك العثور على الـ ID بجانب كل عملة عند عرض محفظتك.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return REMOVE_ID
+
+async def received_remove_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """يستقبل الـ ID ويقوم بالحذف."""
+    user_id = update.effective_user.id
+    try:
+        coin_id_to_remove = int(update.message.text)
+        if db_remove_coin(coin_id_to_remove, user_id):
+            await update.message.reply_text(f"✅ تم حذف العملية رقم `{coin_id_to_remove}` بنجاح.", reply_markup=MAIN_REPLY_MARKUP)
+        else:
+            await update.message.reply_text(f"لم يتم العثور على عملية بالرقم `{coin_id_to_remove}` في محفظتك.", reply_markup=MAIN_REPLY_MARKUP)
+        return ConversationHandler.END
+    except (ValueError):
+        await update.message.reply_text("إدخال غير صالح. الرجاء إرسال رقم فقط.", reply_markup=MAIN_REPLY_MARKUP)
+        return ConversationHandler.END
+
+# --- وظائف جلب الأسعار وعرض المحفظة ---
 
 async def fetch_price(exchange_id, symbol):
-    """تجلب السعر الحالي لعملة معينة من منصة معينة."""
+    """
+    تجلب السعر الحالي لعملة معينة مع معالجة صيغ الرموز المختلفة.
+    """
     exchange = exchanges.get(exchange_id)
     if not exchange:
-        return None
+        return None, "Exchange not initialized"
     try:
-        # بعض المنصات تحتاج إلى تبديل '/' بـ '-'
-        ticker_symbol = symbol.replace('/', '') if exchange.id in ['bybit', 'okx'] else symbol
+        # [تم الإصلاح هنا] معالجة صيغة الرموز لمنصات OKX و Bybit وغيرها
+        if exchange.id in ['bybit', 'okx', 'kucoin', 'mexc']:
+            ticker_symbol = symbol.replace('/', '-')
+        else:
+            ticker_symbol = symbol
+            
         ticker = await exchange.fetch_ticker(ticker_symbol)
-        return ticker['last']
+        return ticker.get('last'), None
+    except ccxt.BadSymbol:
+        logger.warning(f"رمز غير صحيح {ticker_symbol} على منصة {exchange_id}")
+        return None, "رمز غير صحيح"
     except Exception as e:
-        logger.warning(f"لم يتم العثور على سعر لـ {symbol} على منصة {exchange_id}: {e}")
-        return None
+        logger.warning(f"فشل جلب سعر {symbol} من {exchange_id}: {e}")
+        return None, "خطأ في الاتصال"
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعرض المحفظة الكاملة مع حسابات الأرباح والخسائر."""
@@ -288,13 +298,13 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     portfolio = db_get_portfolio(user_id)
 
     if not portfolio:
-        await update.message.reply_text("محفظتك فارغة حالياً. ابدأ بإضافة عملات باستخدام الأمر /add.")
+        await update.message.reply_text("محفظتك فارغة حالياً. اضغط '➕ إضافة عملة' للبدء.", reply_markup=MAIN_REPLY_MARKUP)
         return
 
     msg = await update.message.reply_text("⏳ جارٍ جلب الأسعار الحية وتحديث المحفظة...")
 
     tasks = [fetch_price(item['exchange'], item['symbol']) for item in portfolio]
-    prices = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
 
     total_portfolio_value = Decimal('0.0')
     total_investment_cost = Decimal('0.0')
@@ -302,7 +312,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     report_lines = ["**📊 تقرير محفظتك الحالي**\n", "---"]
     
     for i, item in enumerate(portfolio):
-        current_price = prices[i]
+        current_price, error_msg = results[i]
         
         quantity = Decimal(str(item['quantity']))
         avg_price = Decimal(str(item['avg_price']))
@@ -322,7 +332,6 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             total_portfolio_value += current_value
             pnl = current_value - investment_cost
             pnl_percent = (pnl / investment_cost * 100) if investment_cost > 0 else 0
-            
             pnl_icon = "📈" if pnl >= 0 else "📉"
             
             line += (
@@ -331,8 +340,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f" {pnl_icon} الربح/الخسارة: `${pnl:+.2f} ({pnl_percent:+.2f}%)`"
             )
         else:
-            line += "\n السعر الحالي: `غير متاح`"
-            # نضيف قيمة الاستثمار للقيمة الإجمالية في حال فشل جلب السعر
+            line += f"\n السعر الحالي: `غير متاح ({error_msg})`"
             total_portfolio_value += investment_cost
 
         report_lines.append(line)
@@ -351,28 +359,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await msg.edit_text("\n".join(report_lines), parse_mode=ParseMode.MARKDOWN)
 
-async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يحذف عملة من المحفظة."""
-    user_id = update.effective_user.id
-    try:
-        coin_id_to_remove = int(context.args[0])
-        if db_remove_coin(coin_id_to_remove, user_id):
-            await update.message.reply_text(f"✅ تم حذف العملية رقم `{coin_id_to_remove}` من محفظتك بنجاح.")
-        else:
-            await update.message.reply_text(f"لم يتم العثور على عملية بالرقم `{coin_id_to_remove}` في محفظتك.")
-
-    except (IndexError, ValueError):
-        await update.message.reply_text(
-            "الرجاء تحديد رقم ID للعملية التي تريد حذفها.\n"
-            "مثال: `/remove 12`\n\n"
-            "يمكنك العثور على الـ ID بجانب كل عملة عند عرض محفظتك بالأمر /portfolio."
-        )
-
 
 def main() -> None:
     """الدالة الرئيسية لتشغيل البوت."""
     if TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
-        logger.critical("FATAL ERROR: لم يتم تعيين توكن التليجرام. يرجى تعديل المتغير 'TELEGRAM_BOT_TOKEN'.")
+        logger.critical("FATAL ERROR: لم يتم تعيين توكن التليجرام.")
         return
 
     init_database()
@@ -381,7 +372,7 @@ def main() -> None:
 
     # --- محادثة إضافة عملة ---
     add_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_command)],
+        entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)],
         states={
             EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)],
             SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)],
@@ -391,19 +382,26 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    application.add_handler(add_conv_handler)
-    
-    # --- الأوامر الأخرى ---
+    # --- محادثة حذف عملة ---
+    remove_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)],
+        states={
+            REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("portfolio", portfolio_command))
-    application.add_handler(CommandHandler("remove", remove_command))
+    application.add_handler(add_conv_handler)
+    application.add_handler(remove_conv_handler)
+    
+    # --- معالجات الأزرار الرئيسية ---
+    application.add_handler(MessageHandler(filters.Regex("^📊 عرض المحفظة$"), portfolio_command))
+    application.add_handler(MessageHandler(filters.Regex("^⚙️ الإعدادات$"), settings_command))
+    application.add_handler(MessageHandler(filters.Regex("^❓ مساعدة$"), help_command))
 
     logger.info("... البوت قيد التشغيل ...")
-    # --- [تم التعديل هنا] ---
-    # هذا الأمر يجبر البوت على بدء جلسة نظيفة مع تليجرام
     application.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
