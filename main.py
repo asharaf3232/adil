@@ -28,7 +28,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # --- إعدادات البوت والإصدار ---
-BOT_VERSION = "v5.0.1 - Final Fix"
+BOT_VERSION = "v5.1.0 - Stable"
 getcontext().prec = 30
 
 # --- إعدادات البوت الأساسية ---
@@ -57,7 +57,6 @@ def acquire_lock(instance_id):
             lock = cur.fetchone()
             if lock:
                 is_locked, locked_at, owner_id = lock
-                # Check if locked_at is not None before proceeding
                 if locked_at:
                     is_stale = (datetime.now(ZoneInfo("UTC")) - locked_at) > timedelta(seconds=LOCK_TIMEOUT_SECONDS)
                     if is_locked and not is_stale:
@@ -83,7 +82,6 @@ def release_lock(instance_id):
     if not conn: return
     try:
         with conn.cursor() as cur:
-            # فقط مالك القفل يستطيع تحريره
             cur.execute("UPDATE bot_lock SET is_locked = FALSE WHERE id = %s AND owner_id = %s", (LOCK_ID, instance_id))
         conn.commit()
         logger.info(f"تم تحرير قفل التشغيل بواسطة النسخة: {instance_id}")
@@ -103,38 +101,47 @@ def init_database():
     if not conn: return
     try:
         with conn.cursor() as cur:
+            # إنشاء الجداول الرئيسية في معاملة واحدة
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS portfolio (
                     id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, symbol TEXT NOT NULL,
                     exchange TEXT NOT NULL, quantity TEXT NOT NULL, avg_price TEXT NOT NULL,
                     UNIQUE(user_id, symbol, exchange)
-                )
-            ''')
-            cur.execute('''
+                );
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id BIGINT PRIMARY KEY, alerts_enabled BOOLEAN DEFAULT FALSE,
                     global_alert_threshold REAL DEFAULT 5.0, last_portfolio_value TEXT,
                     last_check_time TIMESTAMP WITH TIME ZONE
-                )
-            ''')
-            cur.execute('''
+                );
                 CREATE TABLE IF NOT EXISTS bot_lock (
                     id INT PRIMARY KEY, is_locked BOOLEAN NOT NULL DEFAULT FALSE,
                     locked_at TIMESTAMP WITH TIME ZONE, owner_id TEXT
-                )
+                );
             ''')
-            try: cur.execute("ALTER TABLE portfolio ADD COLUMN alert_threshold REAL")
-            except psycopg2.errors.DuplicateColumn: pass
-            try: cur.execute("ALTER TABLE portfolio ADD COLUMN alert_last_price TEXT")
-            except psycopg2.errors.DuplicateColumn: pass
+            conn.commit()
+
+            # [تم الإصلاح هنا] كل تعديل في معاملة منفصلة لتجنب الأخطاء
+            try:
+                cur.execute("ALTER TABLE portfolio ADD COLUMN alert_threshold REAL;")
+                conn.commit()
+            except psycopg2.errors.DuplicateColumn:
+                conn.rollback() # إعادة ضبط المعاملة
+            
+            try:
+                cur.execute("ALTER TABLE portfolio ADD COLUMN alert_last_price TEXT;")
+                conn.commit()
+            except psycopg2.errors.DuplicateColumn:
+                conn.rollback() # إعادة ضبط المعاملة
 
             cur.execute("INSERT INTO bot_lock (id, is_locked) VALUES (%s, FALSE) ON CONFLICT (id) DO NOTHING", (LOCK_ID,))
-        conn.commit()
+            conn.commit()
         logger.info("تم تهيئة/التحقق من جداول قاعدة البيانات بنجاح.")
+    except Exception as e:
+        logger.error(f"حدث خطأ فادح أثناء تهيئة قاعدة البيانات: {e}")
     finally:
         if conn: conn.close()
 
-# --- بقية الكود (مع تحديثات طفيفة) ---
+# --- بقية الكود (كما هو مع تحديثات طفيفة) ---
 (EXCHANGE, SYMBOL, QUANTITY, PRICE, SET_GLOBAL_ALERT, 
  SELECT_COIN_ALERT, SET_COIN_ALERT) = range(7)
 REMOVE_ID = range(7, 8)
@@ -165,8 +172,12 @@ async def post_init(application: Application):
         except Exception as e:
             logger.error(f"فشل إرسال رسالة بدء التشغيل للمدير: {e}")
 
-async def post_shutdown(application: Application, instance_id: str):
-    release_lock(instance_id)
+async def post_shutdown(application: Application):
+    # استخدام context للحصول على instance_id
+    instance_id = application.bot_data.get("instance_id")
+    if instance_id:
+        release_lock(instance_id)
+    
     for ex_id, ex_instance in exchanges.items():
         try:
             await ex_instance.close()
@@ -570,7 +581,14 @@ def main() -> None:
         logger.info("لم يتم الحصول على القفل. سيتم إغلاق هذه النسخة.")
         sys.exit(0)
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown, {"instance_id": instance_id}).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+    application.bot_data["instance_id"] = instance_id
     
     add_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^➕ إضافة عملة$"), add_start)], states={EXCHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_exchange)], SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_symbol)], QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_quantity)], PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_price)]}, fallbacks=[CommandHandler("cancel", cancel)])
     remove_conv = ConversationHandler(entry_points=[MessageHandler(filters.Regex("^🗑️ حذف عملة$"), remove_start)], states={REMOVE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_remove_id)]}, fallbacks=[CommandHandler("cancel", cancel)])
@@ -594,7 +612,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex("^تنبيه المحفظة الكلي"), change_global_threshold_start))
     application.add_handler(MessageHandler(filters.Regex("^⚙️ تخصيص تنبيهات العملات$"), custom_alerts_start))
 
-    logger.info("... البوت قيد التشغيل ...")
+    logger.info(f"... البوت قيد التشغيل (النسخة: {instance_id}) ...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
