@@ -147,10 +147,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعرض رسالة المساعدة."""
+    # [تم الإصلاح هنا] تم حذف السطر الذي يحتوي على علامة الاقتباس الخاطئة
     help_text = (
         "**❓ دليل المساعدة**\n\n"
-        "
-"**📊 عرض المحفظة**\n"
+        "**📊 عرض المحفظة**\n"
         "لعرض تقرير مفصل عن محفظتك، يتضمن الأسعار الحية، القيمة الإجمالية، والأرباح والخسائر العائمة لكل عملة.\n\n"
         "**➕ إضافة عملة**\n"
         "لبدء عملية إضافة عملة جديدة لمحفظتك. سيقوم البوت بسؤالك عن التفاصيل خطوة بخطوة.\n\n"
@@ -276,18 +276,24 @@ async def fetch_price(exchange_id, symbol):
     exchange = exchanges.get(exchange_id)
     if not exchange:
         return None, "Exchange not initialized"
+    
+    ticker_symbol = symbol # الصيغة الافتراضية
     try:
-        # [تم الإصلاح هنا] معالجة صيغة الرموز لمنصات OKX و Bybit وغيرها
+        # معالجة صيغة الرموز لمنصات OKX و Bybit وغيرها
         if exchange.id in ['bybit', 'okx', 'kucoin', 'mexc']:
             ticker_symbol = symbol.replace('/', '-')
-        else:
-            ticker_symbol = symbol
-            
+        
         ticker = await exchange.fetch_ticker(ticker_symbol)
         return ticker.get('last'), None
     except ccxt.BadSymbol:
-        logger.warning(f"رمز غير صحيح {ticker_symbol} على منصة {exchange_id}")
-        return None, "رمز غير صحيح"
+        # محاولة ثانية بإزالة الشرطة المائلة تماماً
+        try:
+            ticker_symbol_no_slash = symbol.replace('/', '')
+            ticker = await exchange.fetch_ticker(ticker_symbol_no_slash)
+            return ticker.get('last'), None
+        except Exception as e:
+             logger.warning(f"فشل جلب سعر {symbol} بصيغ متعددة من {exchange_id}: {e}")
+             return None, "رمز غير صحيح"
     except Exception as e:
         logger.warning(f"فشل جلب سعر {symbol} من {exchange_id}: {e}")
         return None, "خطأ في الاتصال"
@@ -362,7 +368,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def main() -> None:
     """الدالة الرئيسية لتشغيل البوت."""
-    if TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
+    if TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN' or not TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL ERROR: لم يتم تعيين توكن التليجرام.")
         return
 
@@ -405,4 +411,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
